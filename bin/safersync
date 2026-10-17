@@ -1,0 +1,690 @@
+#!/usr/bin/env bash
+#
+# safersync - rsync の安全なラッパー（コピー → 照合）
+#
+#   撮影日時などの更新日時を保持したままコピーし、コピー後に差分・
+#   ファイル数・合計サイズを自動照合する。進捗と残り時間も表示する。
+#
+#   ★ このツールは「データを削除しません」。
+#     ・転送先の余分なファイルは消さない（--delete を使わない）
+#     ・転送元も削除しない
+#     不要なファイルは手動で削除してください。
+#
+#   ★ 設定ファイルは使いません。コピー元・コピー先・除外などは
+#     すべてコマンドライン引数で指定します。
+#
+#   使い方: safersync --help
+#
+# 作成: 2026-10-17
+#
+set -o pipefail
+
+VERSION="1.0.0"
+PROG="$(basename "$0")"
+
+# ログの場所。macOS は ~/Library/Logs、XDG 環境変数があればそれを優先する。
+if [ -n "${SAFERSYNC_LOG_DIR:-}" ]; then
+  LOG_DIR="$SAFERSYNC_LOG_DIR"
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+  LOG_DIR="$XDG_STATE_HOME/safersync"
+elif [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+  LOG_DIR="$HOME/Library/Logs/safersync"
+else
+  LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/safersync"
+fi
+LOG_FILE="$LOG_DIR/safersync.log"
+
+# 外付けボリュームの基点。macOS は /Volumes。
+# それ以外の環境では --mount-root か $SAFERSYNC_MOUNT_ROOT で変更する。
+MOUNT_ROOT="${SAFERSYNC_MOUNT_ROOT:-/Volumes}"
+
+# ---------------------------------------------------------------------------
+# 既定値（コマンドラインで上書きする）
+# ---------------------------------------------------------------------------
+DEFAULT_EXCLUDES=(
+  ".DS_Store"
+  "._*"
+  ".Spotlight-V100"
+  ".fseventsd"
+  ".Trashes"
+  ".TemporaryItems"
+  ".AppleDouble"
+)
+
+# コピー先が exFAT / FAT の場合 1（既定）。
+# exFAT はパーミッション・所有権を保存できず時刻にも誤差が出るため、
+# それらを比較から外して「差分の誤検知」を防ぐ。
+# --apfs を付けると 0 になる（-a を使う）。
+FAT_MODE=1
+
+# ---------------------------------------------------------------------------
+# 表示ヘルパ
+# ---------------------------------------------------------------------------
+if [ -t 1 ]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+else
+  C_RESET=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
+fi
+
+info() { printf '%s %s\n' "${C_BLUE}==>${C_RESET}" "$*"; }
+ok()   { printf '%s %s\n' "${C_GREEN}✓${C_RESET}" "$*"; }
+warn() { printf '%s %s\n' "${C_YELLOW}!${C_RESET}" "$*" >&2; }
+err()  { printf '%s %s\n' "${C_RED}✗${C_RESET}" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+log_msg() {
+  mkdir -p "$LOG_DIR" 2>/dev/null && \
+    printf '%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE" 2>/dev/null
+  return 0
+}
+
+fmt_bytes() {
+  awk -v b="${1:-0}" 'BEGIN{
+    split("B KB MB GB TB", u, " ");
+    i=1; while (b>=1024 && i<5) { b/=1024; i++ }
+    printf "%.1f %s", b, u[i]
+  }'
+}
+
+# 秒数を「1時間2分」「2分3秒」「4秒」の形にする
+fmt_duration() {
+  local s="${1:-0}" h m
+  h=$(( s / 3600 )); m=$(( (s % 3600) / 60 )); s=$(( s % 60 ))
+  if   [ "$h" -gt 0 ]; then printf '%d時間%d分' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%d分%d秒' "$m" "$s"
+  else                      printf '%d秒' "$s"
+  fi
+}
+
+# 末尾の "/" を取り除く（"/" だけは残す）。
+#   "SRC/" と "SRC" を同じ意味にそろえ、書き方の違いによる事故を防ぐ。
+strip_trailing_slashes() {
+  local p="$1"
+  while [ "$p" != "/" ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  printf '%s' "$p"
+}
+
+# 相対パスを、実行時のカレントディレクトリ基準の絶対パスに変換し、
+# 末尾の "/" をそろえる（どのフォルダから起動しても同じ意味になる。存在しなくてもよい）
+abspath() {
+  local p
+  case "$1" in
+    /*)  p="$1" ;;
+    ./*) p="$PWD/${1#./}" ;;
+    *)   p="$PWD/$1" ;;
+  esac
+  strip_trailing_slashes "$p"
+}
+
+expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
+
+# ---------------------------------------------------------------------------
+# コピー先の確認（未マウントの外付けボリュームへ書き込む事故を防ぐ）
+# ---------------------------------------------------------------------------
+
+# パスそのものがマウントポイントかどうか
+is_mount_point() {   # $1=path
+  [ -d "$1" ] || return 1
+  mount 2>/dev/null | grep -Fq " on $1 "
+}
+
+# パス（存在しなければ最も近い既存の祖先）から上にたどり、
+# 最初に見つかる実マウントポイントを返す。見つからなければ "/"。
+mount_point_of() {   # $1=path
+  local p="$1"
+  while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+  while : ; do
+    if is_mount_point "$p"; then printf '%s' "$p"; return 0; fi
+    [ "$p" = "/" ] && break
+    p="$(dirname "$p")"
+  done
+  printf '/'
+}
+
+# コピー先が $MOUNT_ROOT の下にあるのに、そのボリュームが実マウントされて
+# いなければ、開始前に中止する（終了コード 2）。
+# 基点の外（~/ や /tmp など）を指定したときは判定しない。
+require_mounted_dest() {   # $1=dst
+  [ "$MOUNT_ROOT" = "/" ] && return 0
+  case "$1" in
+    "$MOUNT_ROOT"/*) ;;
+    *) return 0 ;;
+  esac
+
+  local mp; mp="$(mount_point_of "$1")"
+  case "$mp" in
+    "$MOUNT_ROOT"/*) return 0 ;;
+  esac
+
+  err "コピー先のボリュームがマウントされていません: $1"
+  err "外付け媒体を接続してから再実行してください。"
+  err "現在の ${MOUNT_ROOT}: $(ls "$MOUNT_ROOT" 2>/dev/null | tr '\n' ' ')"
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
+# 除外オプションの組み立て
+# ---------------------------------------------------------------------------
+EXCLUDE_ARGS=()
+META_OPTS=()
+FIND_EXCL=()
+build_rsync_opts() {
+  EXCLUDE_ARGS=()
+  local e
+  for e in "${DEFAULT_EXCLUDES[@]}"; do EXCLUDE_ARGS+=("--exclude=$e"); done
+  for e in "${EXCLUDE_PATTERNS[@]}"; do EXCLUDE_ARGS+=("--exclude=$e"); done
+
+  if [ "$FAT_MODE" = 1 ]; then
+    # -rlt: 再帰・シンボリックリンク・更新時刻を保持（-p/-o/-g は付けない）
+    # --modify-window=2: exFAT の時刻丸めによる誤差を許容
+    META_OPTS=( -rlt --modify-window=2 )
+  else
+    META_OPTS=( -a )
+  fi
+
+  # 照合時のファイル数・サイズ集計でも、転送時と同じ除外を適用する
+  FIND_EXCL=()
+  local first=1
+  for e in "${DEFAULT_EXCLUDES[@]}" "${EXCLUDE_PATTERNS[@]}"; do
+    [ -n "$e" ] || continue
+    if [ "$first" = 1 ]; then FIND_EXCL+=( -name "$e" ); first=0
+    else FIND_EXCL+=( -o -name "$e" ); fi
+  done
+}
+
+# ファイルサイズの取得方法は BSD/macOS（stat -f '%z'）と GNU（stat -c '%s'）で違う。
+# 起動時に判定して STAT_SIZE に入れておく。
+if stat -c '%s' "$0" >/dev/null 2>&1; then
+  STAT_SIZE=( -c '%s' )      # GNU coreutils
+else
+  STAT_SIZE=( -f '%z' )      # BSD / macOS
+fi
+
+# 除外パターンを除いた「ファイル数 合計バイト数」を返す
+scan_dir() {   # $1=dir
+  find "$1" \( "${FIND_EXCL[@]}" \) -prune -o -type f -print0 2>/dev/null \
+    | xargs -0 stat "${STAT_SIZE[@]}" 2>/dev/null \
+    | awk '{c++; s+=$1} END {printf "%d %d", c+0, s+0}'
+}
+
+# rsync の dry-run を行い、結果を DIFF_RAW に入れる（空なら差分なし）
+#   $1=src $2=dst $3=出力フォーマット（既定: %i %n）
+DIFF_RAW=""
+collect_diff() {
+  local -a opts=(-n --out-format="${3:-%i %n}" "${META_OPTS[@]}" "${EXCLUDE_ARGS[@]}")
+  [ "$CHECKSUM" = 1 ] && opts+=( --checksum )
+  DIFF_RAW="$(rsync "${opts[@]}" "$1/" "$2/" 2>/dev/null)"
+}
+
+# コピーが必要なファイルの「件数・合計バイト数・一覧」を求める
+#   結果は PLAN_FILES / PLAN_BYTES / PLAN_LINES に入る。
+#   ディレクトリや属性だけの変化は数えない（ファイルだけを対象にする）。
+PLAN_FILES=0
+PLAN_BYTES=0
+PLAN_LINES=()
+plan_changes() {   # $1=src $2=dst
+  collect_diff "$1" "$2" '%i %l %n'
+
+  PLAN_FILES=0
+  PLAN_BYTES=0
+  PLAN_LINES=()
+
+  local line item size name
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    item="${line%% *}"
+    case "$item" in
+      '>f'*) ;;          # 転送される通常ファイル
+      *) continue ;;     # ディレクトリ・属性のみの変化は対象外
+    esac
+    size="${line#* }"; size="${size%% *}"
+    name="${line#* }"; name="${name#* }"
+    PLAN_FILES=$(( PLAN_FILES + 1 ))
+    PLAN_BYTES=$(( PLAN_BYTES + ${size:-0} ))
+    PLAN_LINES+=( "$item $name" )
+  done <<< "$DIFF_RAW"
+}
+
+# 指定パス（存在しなければ最も近い既存の祖先）の空き容量をバイトで返す
+free_bytes() {   # $1=path
+  local p="$1"
+  while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+  df -k "$p" 2>/dev/null | awk 'NR==2{printf "%d", $4 * 1024}'
+}
+
+# ---------------------------------------------------------------------------
+# 進捗表示（プログレスバー ＋ 速度 ＋ 残り時間）
+# ---------------------------------------------------------------------------
+draw_progress() {   # $1=pct $2=done $3=total $4=speed(bps) $5=eta秒(-1で不明)
+  local pct="$1" done="$2" total="$3" spd="$4" eta="$5"
+
+  # 端末幅に合わせてバーの長さを変える（狭いと折り返して表示が崩れるため）
+  local cols="${COLUMNS:-}"
+  [ -n "$cols" ] || cols="$(tput cols 2>/dev/null || echo 80)"
+  local width
+  if   [ "$cols" -ge 110 ] 2>/dev/null; then width=24
+  elif [ "$cols" -ge 90 ];              then width=16
+  elif [ "$cols" -ge 70 ];              then width=8
+  else                                       width=0
+  fi
+
+  local bar="" filled i prefix="" eta_txt="--"
+  if [ "$width" -gt 0 ]; then
+    filled=$(( pct * width / 100 ))
+    i=0
+    while [ "$i" -lt "$filled" ]; do bar="${bar}█"; i=$((i + 1)); done
+    while [ "$i" -lt "$width" ];  do bar="${bar}░"; i=$((i + 1)); done
+    prefix="[$bar] "
+  fi
+  if [ "$eta" -ge 0 ] 2>/dev/null; then eta_txt="約 $(fmt_duration "$eta")"; fi
+
+  local tail_txt="  残り $eta_txt"
+  [ "$pct" -ge 100 ] && tail_txt=""
+
+  printf '\r\033[K  %s%3d%%  %s / %s  %s/s%s' \
+    "$prefix" "$pct" "$(fmt_bytes "$done")" "$(fmt_bytes "$total")" "$(fmt_bytes "$spd")" "$tail_txt"
+}
+
+# コマンド（rsync）を実行しながら、転送先の増分から進捗と残り時間を表示する
+run_with_progress() {   # $1=src $2=dst $3...=実行するコマンド
+  local src="$1" dst="$2"; shift 2
+  local total base start now elapsed done_bytes gained speed pct eta
+  total="$(scan_dir "$src" | awk '{print $2}')"; [ -n "$total" ] || total=0
+  base="$(scan_dir "$dst" | awk '{print $2}')";  [ -n "$base" ]  || base=0
+  start="$(date +%s)"
+
+  # rsync の統計出力は一時ファイルへ退避し、進捗行と混ざらないようにする
+  local out; out="$(mktemp "${TMPDIR:-/tmp}/safersync.XXXXXX" 2>/dev/null)" || out=""
+  if [ -n "$out" ]; then "$@" >"$out" 2>&1 & else "$@" 2>&1 & fi
+  local pid=$!
+
+  # Ctrl-C / TERM で子プロセス（caffeinate → rsync）も確実に止める
+  trap 'pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 1; pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; printf "\n中断しました\n" >&2; exit 130' INT TERM
+
+  local cmd_rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 2
+    kill -0 "$pid" 2>/dev/null || break
+    now="$(date +%s)"; elapsed=$(( now - start )); [ "$elapsed" -gt 0 ] || elapsed=1
+    done_bytes="$(scan_dir "$dst" | awk '{print $2}')"; [ -n "$done_bytes" ] || done_bytes=0
+    gained=$(( done_bytes - base )); [ "$gained" -lt 0 ] && gained=0
+    speed=$(( gained / elapsed ))
+    if [ "$total" -gt 0 ]; then pct=$(( done_bytes * 100 / total )); else pct=100; fi
+    [ "$pct" -gt 100 ] && pct=100
+    if [ "$speed" -gt 0 ] && [ "$total" -gt "$done_bytes" ]; then
+      eta=$(( (total - done_bytes) / speed ))
+    else
+      eta=-1
+    fi
+    draw_progress "$pct" "$done_bytes" "$total" "$speed" "$eta"
+  done
+
+  wait "$pid"; cmd_rc=$?
+  trap - INT TERM
+  printf '\r\033[K'
+  if [ -n "$out" ]; then [ -s "$out" ] && cat "$out"; rm -f "$out"; fi
+  return "$cmd_rc"
+}
+
+# ---------------------------------------------------------------------------
+# コピー（--delete は使わない。既存のファイルは消さない）
+# ---------------------------------------------------------------------------
+copy_one() {   # $1=src $2=dst
+  local src="$1" dst="$2"
+  [ -d "$src" ] || { err "コピー元が存在しません: $src"; return 1; }
+
+  # ボリュームの直下を指定すると中身が散らばるので、先に知らせる
+  if is_mount_point "$dst"; then
+    warn "コピー先がボリュームの直下です: $dst"
+    warn "コピー元の中身がこのフォルダの直下に入ります（まとめたいときは下位フォルダを指定してください）"
+  fi
+
+  # 何件・何バイトコピーする必要があるかを先に調べる
+  plan_changes "$src" "$dst"
+
+  if [ "$PLAN_FILES" -eq 0 ]; then
+    ok "転送するものはありません（すべて最新です）"
+    log_msg "COPY skip   $src -> $dst (no changes)"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '    コピーするファイル: %d 件（%s） ※dry-run のため実際にはコピーしません\n' \
+      "$PLAN_FILES" "$(fmt_bytes "$PLAN_BYTES")"
+    local shown=0 l
+    for l in "${PLAN_LINES[@]}"; do
+      [ "$shown" -lt 20 ] || break
+      printf '    %s\n' "$l"
+      shown=$((shown + 1))
+    done
+    if [ "${#PLAN_LINES[@]}" -gt 20 ]; then
+      printf '    …（他 %d 件）\n' "$(( ${#PLAN_LINES[@]} - 20 ))"
+    fi
+    printf '    %s\n' "（記号: > 新規/更新, f ファイル, + 新規作成, s サイズ, t 時刻）"
+    return 0
+  fi
+
+  # 空き容量の確認（足りなければ、始める前に止める）
+  if [ "$IGNORE_SPACE" = 0 ]; then
+    local free; free="$(free_bytes "$dst")"
+    if [ "${free:-0}" -gt 0 ] && [ "$PLAN_BYTES" -gt "$free" ]; then
+      err "空き容量が足りません: コピーする量 $(fmt_bytes "$PLAN_BYTES") / 空き $(fmt_bytes "$free")"
+      err "不要なファイルを削除するか、別の保存先を指定してください。"
+      err "空き容量を無視して続行するには --ignore-space-check を付けてください。"
+      log_msg "COPY abort  $src -> $dst (not enough space)"
+      return 3
+    fi
+  fi
+
+  mkdir -p "$dst" || { err "コピー先を作成できません: $dst"; return 1; }
+
+  printf '    コピーするファイル: %d 件（%s）\n' "$PLAN_FILES" "$(fmt_bytes "$PLAN_BYTES")"
+  log_msg "COPY start  $src -> $dst ($PLAN_FILES files)"
+  local -a cmd=(rsync "${META_OPTS[@]}" --human-readable --partial "${EXCLUDE_ARGS[@]}" "$src/" "$dst/")
+  if [ "$VERBOSE" = 1 ]; then cmd+=( --stats ); else cmd+=( -q ); fi
+  if [ "$NO_CAFFEINATE" = 0 ] && command -v caffeinate >/dev/null 2>&1; then
+    cmd=(caffeinate -i "${cmd[@]}")
+  fi
+
+  local copy_start copy_end rc=0
+  copy_start="$(date +%s)"
+  if [ "$SHOW_PROGRESS" = 1 ]; then
+    run_with_progress "$src" "$dst" "${cmd[@]}" || rc=$?
+  else
+    "${cmd[@]}" || rc=$?
+  fi
+  copy_end="$(date +%s)"
+  if [ "$rc" -ne 0 ]; then
+    err "rsync がエラー終了しました (rc=$rc)"
+    log_msg "COPY failed $src -> $dst (rc=$rc)"
+    return 1
+  fi
+  ok "コピー完了（${PLAN_FILES} ファイル / $(fmt_bytes "$PLAN_BYTES") / $(fmt_duration $(( copy_end - copy_start )))）"
+  log_msg "COPY done   $src -> $dst"
+  TOTAL_FILES=$(( TOTAL_FILES + PLAN_FILES ))
+  TOTAL_BYTES=$(( TOTAL_BYTES + PLAN_BYTES ))
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 照合（差分・ファイル数・合計バイト数）
+# ---------------------------------------------------------------------------
+verify_one() {   # $1=src $2=dst
+  local src="$1" dst="$2"
+  [ -d "$src" ] || { err "コピー元が存在しません: $src"; return 1; }
+  [ -d "$dst" ] || { err "コピー先が存在しません: $dst"; return 1; }
+
+  # --delete を付けないので、転送先の余分なファイルは差分として出ない
+  collect_diff "$src" "$dst" '%i %n'
+
+  # 「ディレクトリの属性・時刻だけの違い（.d…）」は中身とは無関係で、OS 側の
+  # 都合で合わせられないことがある（exFAT のボリューム直下は 1970 年で固定）。
+  # 合否はファイルの欠落・内容の違いだけで判定する。
+  local sig
+  sig="$(printf '%s\n' "$DIFF_RAW" | grep -v '^\.d' | grep -v '^$')"
+
+  if [ -n "$sig" ]; then
+    err "差分が見つかりました（コピー先に未転送/不一致のファイルがあります）:"
+    printf '%s\n' "$sig" | head -n 20
+    if [ "$(printf '%s\n' "$sig" | wc -l | tr -d ' ')" -gt 20 ]; then
+      printf '    …（他 %d 件）\n' "$(( $(printf '%s\n' "$sig" | wc -l | tr -d ' ') - 20 ))"
+    fi
+    log_msg "VERIFY diff $src vs $dst"
+    return 1
+  fi
+
+  # 集計は「参考情報」。転送先の余分なファイルは許容するため、
+  # 数が一致しなくても失敗にしない（合否判定は上の rsync 差分で行う）。
+  local sc dc sb db sres dres extra
+  sres="$(scan_dir "$src")"; dres="$(scan_dir "$dst")"
+  sc="${sres%% *}";  sb="${sres##* }"
+  dc="${dres%% *}";  db="${dres##* }"
+  extra=$(( dc - sc ))
+
+  printf '    コピー元 %s ファイル / %s、転送先 %s ファイル / %s\n' \
+    "$sc" "$(fmt_bytes "$sb")" "$dc" "$(fmt_bytes "$db")"
+  if [ "$extra" -gt 0 ]; then
+    info "転送先には ${extra} 件多いファイルがあります（削除しません）"
+  elif [ "$extra" -lt 0 ]; then
+    warn "転送先の方が $((-extra)) 件少ないです（要確認）"
+  fi
+
+  ok "照合 OK（コピー元の全ファイルが転送先に存在）"
+  log_msg "VERIFY ok   $src vs $dst (src $sc files / dst $dc files)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 1件の処理
+# ---------------------------------------------------------------------------
+run_job() {   # $1=src $2=dst
+  local src="$1" dst="$2"
+  if [ "$MODE" = "verify" ]; then
+    verify_one "$src" "$dst"; return $?
+  fi
+
+  copy_one "$src" "$dst"; local crc=$?
+  [ "$crc" -eq 0 ] || return "$crc"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+
+  if [ "$DO_VERIFY" = 1 ]; then
+    verify_one "$src" "$dst" || return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 接続状態の表示
+# ---------------------------------------------------------------------------
+do_status() {
+  printf '%sマウントされているボリューム%s（%s）\n' "$C_BOLD" "$C_RESET" "$MOUNT_ROOT"
+  local v name
+  for v in "$MOUNT_ROOT"/*; do
+    [ -d "$v" ] || continue
+    name="$(basename "$v")"
+    printf '  %-20s ' "$name"
+    df -h "$v" 2>/dev/null | awk 'NR==2{printf "%s 使用 / %s（空き %s）\n", $3, $2, $4}'
+  done
+  printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# ヘルプ
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+${C_BOLD}${PROG} v${VERSION}${C_RESET} - rsync の安全なラッパー（コピー → 照合）
+
+  ${C_YELLOW}このツールはデータを削除しません。${C_RESET}
+  転送先の余分なファイルも、転送元のファイルも消しません。
+  設定ファイルは使いません（すべて引数で指定します）。
+
+${C_BOLD}使い方${C_RESET}
+  $PROG [オプション] <コピー元> <コピー先>
+
+  コピー元はフォルダのパス、コピー先は保存先フォルダのパスを指定します。
+  コピー元フォルダの中身が、コピー先フォルダの中へ入ります（追加のみ）。
+  コピー先フォルダが無ければ作られます。
+  末尾の "/" は付けても付けなくても同じ意味になります。
+
+${C_BOLD}例${C_RESET}
+  $PROG ~/写真 /Volumes/HDD/写真
+      # → HDD の 写真フォルダへコピー＆照合（無ければ作られる）
+  $PROG ~/書類 /Volumes/HDD/backup/書類
+      # → HDD 内の下位フォルダも自由に指定できる
+  $PROG ~/写真 /Volumes/HDD/写真 --verify-only   # 照合のみ
+  $PROG ~/写真 /Volumes/HDD/写真 -n              # dry-run
+  $PROG ~/書類 /Volumes/HDD/書類 --exclude '*.tmp'    # 追加で除外
+  $PROG --status                                              # ボリュームの状態
+
+${C_BOLD}オプション${C_RESET}
+      --mount-root DIR 外付けボリュームの基点（既定: /Volumes。例: /media/ユーザー名）
+  -t, --to DIR         コピー先（位置引数と同じ。順序は自由）
+  -f, --from DIR       コピー元（位置引数と同じ。順序は自由）
+  -x, --exclude PAT    追加で除外するパターン（複数可。例: '*.tmp'）
+      --fat            コピー先が exFAT/FAT（既定。属性差を比較しない）
+      --apfs           コピー先が APFS/HFS+（属性も保持・比較する）
+  -n, --dry-run        実際にはコピーせず、対象を確認する
+      --verify-only    コピーせず照合のみ行う
+      --no-verify      コピー後の自動照合を行わない
+  -c, --checksum       内容のハッシュで照合（厳密だが遅い）
+      --ignore-space-check  空き容量が足りなくても中止せず続行する
+  -v, --stats           rsync の詳細な統計を表示する（既定は非表示）
+      --progress       進捗と残り時間（ETA）を表示（端末なら既定でON）
+      --no-progress    進捗表示をしない（パイプやログ向け）
+      --no-caffeinate  スリープ防止（caffeinate）を使わない
+      --status         マウント中のボリュームと空き容量を表示
+  -h, --help           このヘルプ
+  -V, --version        バージョン表示
+
+終了コード
+  0 成功 / 1 エラー / 2 コピー先が未マウント / 3 空き容量不足 / 130 中断
+
+環境変数
+  SAFERSYNC_MOUNT_ROOT  外付けボリュームの基点（--mount-root と同じ）
+  SAFERSYNC_LOG_DIR     ログの場所（既定: macOS は ~/Library/Logs/safersync）
+
+ログ: $LOG_FILE
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# 引数解析
+# ---------------------------------------------------------------------------
+MODE="copy"          # copy | verify | status | help | version
+DRY_RUN=0
+DO_VERIFY=1
+CHECKSUM=0
+NO_CAFFEINATE=0
+IGNORE_SPACE=0       # 空き容量チェックを無視する
+VERBOSE=0            # rsync の統計を表示する
+PROGRESS=""          # ""=自動（端末ならON） | 1=ON | 0=OFF
+SHOW_PROGRESS=0
+TOTAL_FILES=0        # この実行でコピーした合計
+TOTAL_BYTES=0
+START_TS=""
+FROM_ARG=""          # コピー元（位置引数 or --from）
+TO_ARG=""            # コピー先（位置引数 or --to）
+EXCLUDE_PATTERNS=()  # --exclude
+
+# コピー元 → コピー先 の順に、空いている方へ入れる。
+#   safersync A B / safersync A --to B / safersync --from A B はすべて同じ意味。
+set_positional() {   # $1=path
+  [ -n "$1" ] || die "パスが空です"
+  if   [ -z "$FROM_ARG" ]; then FROM_ARG="$(expand_tilde "$1")"
+  elif [ -z "$TO_ARG" ];   then TO_ARG="$(expand_tilde "$1")"
+  else die "引数が多すぎます: '$1'（コピー元とコピー先を1つずつ指定してください）"
+  fi
+}
+
+set_from() {   # $1=path
+  [ -n "$1" ] || die "--from にはパスを指定してください"
+  [ -z "$FROM_ARG" ] || die "コピー元は1つだけ指定できます（--from か位置引数のどちらか）"
+  FROM_ARG="$(expand_tilde "$1")"
+}
+
+set_to() {     # $1=path
+  [ -n "$1" ] || die "--to にはパスを指定してください"
+  [ -z "$TO_ARG" ] || die "コピー先は1つだけ指定できます（--to か位置引数のどちらか）"
+  TO_ARG="$(expand_tilde "$1")"
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)        MODE="help"; return 0 ;;
+      -V|--version)     MODE="version"; return 0 ;;
+      --status)         MODE="status" ;;
+      -n|--dry-run)     DRY_RUN=1 ;;
+      --verify-only)    MODE="verify" ;;
+      --no-verify)      DO_VERIFY=0 ;;
+      -c|--checksum)    CHECKSUM=1 ;;
+      --fat)            FAT_MODE=1 ;;
+      --apfs)           FAT_MODE=0 ;;
+      --ignore-space-check) IGNORE_SPACE=1 ;;
+      -v|--verbose|--stats) VERBOSE=1 ;;
+      --progress)       PROGRESS=1 ;;
+      --no-progress)    PROGRESS=0 ;;
+      --no-caffeinate)  NO_CAFFEINATE=1 ;;
+      --mount-root)     shift; MOUNT_ROOT="${1:-}" ;;
+      --mount-root=*)   MOUNT_ROOT="${1#*=}" ;;
+      -t|--to)          shift; set_to "${1:-}" ;;
+      --to=*)           set_to "${1#*=}" ;;
+      -f|--from)        shift; set_from "${1:-}" ;;
+      --from=*)         set_from "${1#*=}" ;;
+      -x|--exclude)     shift; EXCLUDE_PATTERNS+=("${1:-}") ;;
+      --exclude=*)      EXCLUDE_PATTERNS+=("${1#*=}") ;;
+      --)               shift; while [ $# -gt 0 ]; do set_positional "$1"; shift; done; break ;;
+      -*)               die "不明なオプション: $1（--help を参照）" ;;
+      *)                set_positional "$1" ;;
+    esac
+    shift
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+main() {
+  parse_args "$@"
+
+  START_TS="$(date +%s)"
+
+  # ボリュームの基点は、環境変数・引数のどちらで指定されても絶対パスにそろえる
+  MOUNT_ROOT="$(abspath "$(expand_tilde "$MOUNT_ROOT")")"
+
+  case "$MODE" in
+    help)     usage; exit 0 ;;
+    version)  printf '%s\n' "$PROG v$VERSION"; exit 0 ;;
+    status)   do_status; exit 0 ;;
+  esac
+
+  # --- コピー元とコピー先 ---
+  [ -n "$FROM_ARG" ] || die "コピー元を指定してください（例: $PROG ~/書類 /Volumes/HDD/書類）"
+  [ -n "$TO_ARG" ]   || die "コピー先を指定してください（例: $PROG ~/書類 /Volumes/HDD/書類）"
+
+  local src dst
+  src="$(abspath "$FROM_ARG")"
+  dst="$(abspath "$TO_ARG")"
+
+  [ -d "$src" ] || die "コピー元が存在しません: $src"
+  if [ -e "$dst" ] && [ ! -d "$dst" ]; then
+    die "コピー先がフォルダではありません: $dst"
+  fi
+
+  printf '\n%s▶ %s → %s%s\n' "$C_BOLD" "$src" "$dst" "$C_RESET"
+
+  # 未マウントの外付けボリュームへ書き込まない
+  require_mounted_dest "$dst"
+
+  build_rsync_opts
+
+  # 進捗表示（既定はターミナルのときだけ ON。パイプやログでは出さない）
+  if [ "$PROGRESS" = "" ]; then
+    if [ -t 1 ]; then SHOW_PROGRESS=1; else SHOW_PROGRESS=0; fi
+  else
+    SHOW_PROGRESS="$PROGRESS"
+  fi
+
+  # --- 実行 ---
+  local rc=0
+  run_job "$src" "$dst"; rc=$?
+
+  printf '\n'
+  if [ "$rc" -eq 0 ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      ok "dry-run を終えました（実際にはコピーしていません）"
+    elif [ "$MODE" = "verify" ]; then
+      ok "照合のみ完了しました"
+    elif [ "$TOTAL_FILES" -eq 0 ]; then
+      ok "すべて完了（新しくコピーしたファイルはありません）"
+    else
+      ok "すべて完了（${TOTAL_FILES} ファイル / $(fmt_bytes "$TOTAL_BYTES") / $(fmt_duration $(( $(date +%s) - START_TS )))）"
+    fi
+  else
+    err "一部の処理で問題が発生しました（上記のログを確認してください）"
+  fi
+  exit "$rc"
+}
+
+main "$@"
