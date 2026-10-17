@@ -43,6 +43,15 @@ setup() {
   [ "$output" = "0" ]
 }
 
+@test "tui_cp_width は主要レンジを全角(2)と判定する" {
+  run tui_cp_width 26085   # 日
+  [ "$output" = "2" ]
+  run tui_cp_width 65      # 'A'
+  [ "$output" = "1" ]
+  run tui_cp_width 12354   # あ
+  [ "$output" = "2" ]
+}
+
 # ---------------------------------------------------------------------------
 # パディング・切り詰め
 # ---------------------------------------------------------------------------
@@ -73,6 +82,23 @@ setup() {
 @test "tui_repeat_char は指定個数だけ繰り返す" {
   run tui_repeat_char "─" 5
   [ "$output" = "─────" ]
+}
+
+@test "表示幅の計算は LC_ALL を書き換えない（呼び出し元の設定を壊さない）" {
+  local before="$LC_ALL"
+  tui_str_width "日本語abc" >/dev/null
+  tui_truncate "日本語abc" 4 >/dev/null
+  [ "$LC_ALL" = "$before" ]
+}
+
+@test "*_into 版はコマンド置換なしで同じ結果を変数へ書き込む" {
+  local w out
+  tui_str_width_into w "日本語abc"
+  [ "$w" = "9" ]
+  tui_truncate_into out "日本語abc" 4
+  [ "$out" = "日本" ]
+  tui_component_box_row_into out 44 "コピー元: /Volumes/Untitled/DCIM/100GOPRO"
+  [ "$(tui_str_width "$out")" = "44" ]
 }
 
 # ---------------------------------------------------------------------------

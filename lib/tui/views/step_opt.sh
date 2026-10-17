@@ -30,7 +30,7 @@ tui_view_options() {
 
   local n=5 sel=0 key w h i buf cur
   while :; do
-    IFS=' ' read -r w h <<< "$(tui_term_size)"
+    tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
     if [ "$w" -lt 50 ] || [ "$h" -lt 12 ]; then
       tui_render_tiny "$w" "$h"
       key="$(tui_read_key)"
@@ -63,6 +63,5 @@ tui_view_options() {
       ESC|QUIT|EOF) return 1;;
       NONE)     :;;
     esac
-    TUI_WINCH=0
   done
 }

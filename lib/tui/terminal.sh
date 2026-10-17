@@ -13,15 +13,26 @@ TUI_ACTIVE=0
 TUI_WINCH=0
 TUI_CHILD_PID=""
 TUI_INTERRUPTED=0
+TUI_COLS=""
+TUI_LINES=""
 
-# 端末サイズを "COLS LINES" で返す
+# 端末サイズをグローバル変数 TUI_COLS / TUI_LINES に設定する。
+#   ★ tput は 1 回あたり ~10ms かかるサブプロセス。毎フレーム呼ぶと描画が
+#     目に見えて遅くなる。そこで一度だけ取得してキャッシュする。
+#   ★ 値を $(コマンド置換) で返すと、代入がサブシェル内に閉じ込められて
+#     キャッシュが効かない。そのため「グローバル変数へ直接書く」関数にして、
+#     呼び出し側は tui_term_size を実行した後に TUI_COLS / TUI_LINES を読む。
 tui_term_size() {
-  local cols lines
-  cols="${COLUMNS:-}"
-  lines="${LINES:-}"
-  [ -n "$cols" ]  || cols="$(tput cols 2>/dev/null || printf 80)"
-  [ -n "$lines" ] || lines="$(tput lines 2>/dev/null || printf 24)"
-  printf '%s %s' "$cols" "$lines"
+  if [ -z "${TUI_COLS:-}" ] || [ "${TUI_WINCH:-0}" = 1 ]; then
+    if [ -n "${COLUMNS:-}" ] && [ -n "${LINES:-}" ]; then
+      TUI_COLS="$COLUMNS"
+      TUI_LINES="$LINES"
+    else
+      TUI_COLS="$(tput cols 2>/dev/null || printf 80)"
+      TUI_LINES="$(tput lines 2>/dev/null || printf 24)"
+    fi
+    TUI_WINCH=0
+  fi
 }
 
 # 端末の元モードを保存して raw モード（1 文字ずつ・エコーなし）にする

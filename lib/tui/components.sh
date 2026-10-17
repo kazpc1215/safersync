@@ -12,43 +12,76 @@
 # shellcheck disable=SC2154
 # shellcheck disable=SC2034
 
+# ---------------------------------------------------------------------------
+# 罫線ボックス。1 画面に何十行も並ぶため、組み立ては
+#   $(コマンド置換) ではなく printf -v で変数へ直接書く（サブプロセスを増やさない）。
+#   *_into が本体、引数なし版はその薄いラッパ（単発利用やテスト向け）。
+# ---------------------------------------------------------------------------
+
 # ┌── タイトル ─────────────┐
-tui_component_box_top() {   # $1=width $2=title
-  local w="$1" title="${2-}" inner label fill avail
-  inner=$(( w - 2 ))
-  [ "$inner" -lt 0 ] && inner=0
+tui_component_box_top_into() {   # $1=var $2=width $3=title
+  local var="$1" w="$2" title="${3-}" inner label fill avail lw t2
+  inner=$(( w - 2 )); [ "$inner" -lt 0 ] && inner=0
   label="─ ${title} "
-  avail=$(( inner - $(tui_str_width "$label") ))
+  tui_str_width_into lw "$label"
+  avail=$(( inner - lw ))
   if [ "$avail" -lt 0 ]; then
-    label="─ $(tui_truncate "$title" $(( inner > 3 ? inner - 3 : 0 ))) "
-    avail=$(( inner - $(tui_str_width "$label") ))
+    tui_truncate_into t2 "$title" $(( inner > 3 ? inner - 3 : 0 ))
+    label="─ ${t2} "
+    tui_str_width_into lw "$label"
+    avail=$(( inner - lw ))
   fi
   [ "$avail" -lt 0 ] && avail=0
-  fill="$(tui_repeat_char '─' "$avail")"
-  printf '┌%s%s┐' "$label" "$fill"
+  printf -v fill '%*s' "$avail" ''
+  fill="${fill// /─}"
+  printf -v "$var" '┌%s%s┐' "$label" "$fill"
 }
 
 # ├──────────────────────┤
-tui_component_box_sep() {   # $1=width
-  local w="$1" inner=$(( $1 - 2 ))
+tui_component_box_sep_into() {   # $1=var $2=width
+  local var="$1" inner=$(( $2 - 2 )) fill
   [ "$inner" -lt 0 ] && inner=0
-  printf '├%s┤' "$(tui_repeat_char '─' "$inner")"
+  printf -v fill '%*s' "$inner" ''
+  printf -v "$var" '├%s┤' "${fill// /─}"
 }
 
 # └──────────────────────┘
-tui_component_box_bottom() {   # $1=width
-  local inner=$(( $1 - 2 ))
+tui_component_box_bottom_into() {   # $1=var $2=width
+  local var="$1" inner=$(( $2 - 2 )) fill
   [ "$inner" -lt 0 ] && inner=0
-  printf '└%s┘' "$(tui_repeat_char '─' "$inner")"
+  printf -v fill '%*s' "$inner" ''
+  printf -v "$var" '└%s┘' "${fill// /─}"
 }
 
 # │ テキスト（幅に合わせて詰める） │
+tui_component_box_row_into() {   # $1=var $2=width $3=text
+  local var="$1" w="$2" text="${3-}" inner wtext pad
+  inner=$(( w - 4 )); [ "$inner" -lt 0 ] && inner=0
+  tui_str_width_into wtext "$text"
+  if [ "$wtext" -gt "$inner" ]; then
+    tui_truncate_into text "$text" "$inner"
+    wtext="$inner"
+  fi
+  pad=$(( inner - wtext )); [ "$pad" -lt 0 ] && pad=0
+  printf -v "$var" '│ %s%*s │' "$text" "$pad" ''
+}
+
+# --- ここから下は「文字列を返す」薄いラッパ（単発利用・テスト向け）---
+
+tui_component_box_top() {   # $1=width $2=title
+  local __tui_out; tui_component_box_top_into __tui_out "$1" "${2-}"; printf '%s' "$__tui_out"
+}
+
+tui_component_box_sep() {   # $1=width
+  local __tui_out; tui_component_box_sep_into __tui_out "$1"; printf '%s' "$__tui_out"
+}
+
+tui_component_box_bottom() {   # $1=width
+  local __tui_out; tui_component_box_bottom_into __tui_out "$1"; printf '%s' "$__tui_out"
+}
+
 tui_component_box_row() {   # $1=width $2=text
-  local w="$1" text="${2-}" inner
-  inner=$(( w - 4 ))
-  [ "$inner" -lt 0 ] && inner=0
-  text="$(tui_truncate "$text" "$inner")"
-  printf '│ %s │' "$(tui_pad_right "$text" "$inner")"
+  local __tui_out; tui_component_box_row_into __tui_out "$1" "${2-}"; printf '%s' "$__tui_out"
 }
 
 # 何もない 1 行（│                    │）
@@ -86,22 +119,31 @@ tui_component_progress_bar() {   # $1=pct(0-100) $2=width
 #   TUI_TITLE / TUI_HEADER(改行区切り, 空可) / body 行 / TUI_FOOTER を 1 枚にする。
 tui_frame() {   # $1=width $2..=body の行
   local w="$1"; shift
-  local buf line
-  buf="$(tui_component_box_top "$w" "$TUI_TITLE")"$'\n'
+  local buf="" line seg
+  tui_component_box_top_into seg "$w" "$TUI_TITLE"
+  buf="${seg}"$'\n'
   if [ -n "${TUI_HEADER:-}" ]; then
-    buf="${buf}$(tui_component_box_blank "$w")"$'\n'
+    tui_component_box_row_into seg "$w" ""
+    buf="${buf}${seg}"$'\n'
     while IFS= read -r line; do
-      buf="${buf}$(tui_component_box_row "$w" "$line")"$'\n'
+      tui_component_box_row_into seg "$w" "$line"
+      buf="${buf}${seg}"$'\n'
     done <<< "$TUI_HEADER"
   fi
-  buf="${buf}$(tui_component_box_sep "$w")"$'\n'
+  tui_component_box_sep_into seg "$w"
+  buf="${buf}${seg}"$'\n'
   for line in "$@"; do
-    buf="${buf}$(tui_component_box_row "$w" "$line")"$'\n'
+    tui_component_box_row_into seg "$w" "$line"
+    buf="${buf}${seg}"$'\n'
   done
-  buf="${buf}$(tui_component_box_blank "$w")"$'\n'
-  buf="${buf}$(tui_component_box_sep "$w")"$'\n'
-  buf="${buf}$(tui_component_box_row "$w" "${TUI_FOOTER:-}")"$'\n'
-  buf="${buf}$(tui_component_box_bottom "$w")"
+  tui_component_box_row_into seg "$w" ""
+  buf="${buf}${seg}"$'\n'
+  tui_component_box_sep_into seg "$w"
+  buf="${buf}${seg}"$'\n'
+  tui_component_box_row_into seg "$w" "${TUI_FOOTER:-}"
+  buf="${buf}${seg}"$'\n'
+  tui_component_box_bottom_into seg "$w"
+  buf="${buf}${seg}"
   printf '%s' "$buf"
 }
 
@@ -117,7 +159,7 @@ tui_render_tiny() {   # $1=width $2=height
 # 単純なメッセージを出して 1 キー待つ
 tui_message() {   # $1=message
   local w h
-  IFS=' ' read -r w h <<< "$(tui_term_size)"
+  tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
   [ "$w" -ge 40 ] || w=40
   local buf=""
   buf="$(tui_component_box_top "$w" "${TUI_TITLE:-safersync}")"$'\n'
@@ -140,7 +182,7 @@ tui_menu() {
   [ "$sel" -ge "$n" ] 2>/dev/null && sel=0
   [ "$n" -gt 0 ] || return 1
   while :; do
-    IFS=' ' read -r w h <<< "$(tui_term_size)"
+    tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
     if [ "$w" -lt 50 ] || [ "$h" -lt 12 ]; then
       tui_render_tiny "$w" "$h"
       key="$(tui_read_key)"
@@ -165,7 +207,6 @@ tui_menu() {
       ESC|QUIT|EOF) return 1;;
       NONE)     :;;
     esac
-    TUI_WINCH=0
   done
 }
 
@@ -175,7 +216,7 @@ tui_menu() {
 tui_prompt() {
   local input="" key w h buf
   while :; do
-    IFS=' ' read -r w h <<< "$(tui_term_size)"
+    tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
     [ "$w" -ge 40 ] || w=40
     buf="$(tui_frame "$w" \
       "" \
@@ -202,7 +243,7 @@ tui_busy() {   # $1=ラベル $2...=コマンド
   TUI_CHILD_PID="$pid"
   local spin='|/-\\' i=0 w h buf c
   while kill -0 "$pid" 2>/dev/null; do
-    IFS=' ' read -r w h <<< "$(tui_term_size)"
+    tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
     c="${spin:$(( i % 4 )):1}"
     buf="$(tui_frame "$w" "" "  $c $label")"
     tui_screen_render "$buf"

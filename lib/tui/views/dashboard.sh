@@ -9,7 +9,7 @@
 # ダッシュボード 1 フレームを描く
 tui_render_dashboard() {   # $1=pct $2=done $3=total $4=speed $5=eta
   local pct="$1" done="$2" total="$3" spd="$4" eta="${5:--1}" w h bar eta_txt buf inner
-  IFS=' ' read -r w h <<< "$(tui_term_size)"
+  tui_term_size; w="$TUI_COLS"; h="$TUI_LINES"
   [ "$w" -ge 50 ] || w=50
   inner=$(( w - 8 )); [ "$inner" -lt 10 ] && inner=10
   bar="$(tui_component_progress_bar "$pct" "$inner")"
@@ -130,7 +130,7 @@ tui_view_dashboard() {   # $1=src $2=dst
 # Step 6 本体。完了レポートを表示して 1 キー待つ
 tui_view_done() {   # $1=rc
   local rc="$1" w buf status verify_txt
-  IFS=' ' read -r w _ <<< "$(tui_term_size)"
+  tui_term_size; w="$TUI_COLS"
   [ "$w" -ge 50 ] || w=50
 
   if [ "$rc" -eq 0 ] && [ "${TUI_VERIFY_RC:-0}" -eq 0 ]; then
