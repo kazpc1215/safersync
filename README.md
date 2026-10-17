@@ -40,7 +40,7 @@ sudo ln -sfn ~/safersync/bin/safersync /usr/local/bin/safersync
 ### ステップ 3: 動作確認
 ```sh
 safersync --version
-# safersync v1.0.0 と表示されれば完了です
+# safersync v1.1.0 と表示されれば完了です
 ```
 
 ---
@@ -95,6 +95,32 @@ safersync ~/写真 /Volumes/HDD/写真
 
 ✓ すべて完了（新しくコピーしたファイルはありません）
 ```
+
+## 対話ウィザード（TUI）
+
+コマンドに不慣れでも、**矢印キーとスペースキーだけ**でコピーできます。
+ターミナルで引数なしに `safersync` と打つと起動します（`-i` / `--tui` でも起動）。
+
+```sh
+safersync          # 対話ウィザードが開く
+safersync --tui    # 明示的に起動
+```
+
+- 引数を付けて実行したときは、これまでどおり CLI として動きます（自動化スクリプトは壊れません）。
+- パイプ・リダイレクト・cron など**対話端末でないときは起動しません**（従来どおりエラーになります）。
+
+流れ:
+
+1. コピー元（SD カードの `DCIM/...` など）を選ぶ
+2. コピー先（外付け HDD のフォルダ）を選ぶ
+3. 除外（`.LRV` / `.THM` など）と照合方法を切り替える
+4. 差分のプレビューを確認して「今すぐ開始」（未マウント・空き容量不足はここでブロック）
+5. 進捗ダッシュボード（`Ctrl-C` で安全に中断、次回は続きから再開）
+6. 完了レポート
+
+操作: `↑/↓` 移動、`Space` 切り替え、`Enter` 決定、`Esc` 戻る、`q` / `Ctrl-C` 終了。
+
+---
 
 ## 使い方
 
@@ -191,6 +217,7 @@ safersync ~/書類     /Volumes/HDD/書類
 
 | オプション | 説明 |
 |---|---|
+| `-i`, `--tui` | 対話ウィザード（TUI）を起動する。引数なしでも起動 |
 | `-f`, `--from DIR` | コピー元（位置引数と同じ。順序は自由） |
 | `-t`, `--to DIR` | コピー先（位置引数と同じ。順序は自由） |
 | `--mount-root DIR` | 外付けボリュームの基点（既定: `/Volumes`。Linux なら `/media/ユーザー名` など）。未マウント検出に使う |
@@ -301,11 +328,18 @@ bats test/safersync.bats # このファイルだけ
 
 ```
 safersync/
-├── bin/safersync        本体（bash）
+├── bin/safersync            エントリーポイント（引数解析・CLI 表示・TUI 起動）
+├── lib/
+│   ├── core/                表示を持たない純ロジック（env / disk / sync / verify）
+│   └── tui/                 画面（terminal / input / layout / components / views / app）
 ├── test/
-│   ├── safersync.bats   テスト（bats-core）
-│   └── test_helper.bash テスト共通ヘルパ
+│   ├── safersync.bats       CLI テスト（bats-core）
+│   ├── tui_layout.bats      TUI 描画（表示幅）テスト
+│   ├── tui_components.bats  TUI 部品・キー入力テスト
+│   └── test_helper.bash     テスト共通ヘルパ
 └── README.md
 ```
+
+- コア（`lib/core/`）は画面に出力しません。CLI でも TUI でも同じロジックを共有します。
 
 - ログ: `~/Library/Logs/safersync/safersync.log`（`SAFERSYNC_LOG_DIR` で変更可）

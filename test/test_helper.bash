@@ -5,8 +5,10 @@
 #   すべてのテストは一時フォルダ内と、このテストが作成した exFAT
 #   ディスクイメージのマウント先だけで完結する。実データには触れない。
 
-# テスト対象（このリポジトリの bin/safersync）
-SAFERSYNC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)/bin/safersync"
+# テスト対象（このリポジトリの bin/safersync と lib/）
+REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+SAFERSYNC="$REPO_ROOT/bin/safersync"
+LIB_DIR="$REPO_ROOT/lib"
 
 # exFAT テスト用ボリュームの名前（exFAT のラベルは 11 文字まで）
 VOL_NAME="SAFERSYNC"
