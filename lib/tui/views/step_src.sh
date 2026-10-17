@@ -30,35 +30,6 @@ tui_volumes_load() {
   done
 }
 
-# コピー元の候補フォルダを TUI_FOLDERS / TUI_FOLDER_LABELS に作る
-tui_source_candidates() {   # $1=volume
-  local vol="$1" d base
-  TUI_FOLDERS=()
-  TUI_FOLDER_LABELS=()
-  if [ -d "$vol/DCIM" ]; then
-    for d in "$vol/DCIM"/*/; do
-      [ -d "$d" ] || continue
-      base="$(basename "$d")"
-      TUI_FOLDERS+=( "${d%/}" )
-      TUI_FOLDER_LABELS+=( "DCIM/${base}" )
-    done
-    TUI_FOLDERS+=( "$vol/DCIM" )
-    TUI_FOLDER_LABELS+=( "DCIM (全体)" )
-  else
-    for d in "$vol"/*/; do
-      [ -d "$d" ] || continue
-      base="$(basename "$d")"
-      case "$base" in .*) continue;; esac
-      TUI_FOLDERS+=( "${d%/}" )
-      TUI_FOLDER_LABELS+=( "$base" )
-    done
-  fi
-  TUI_FOLDERS+=( "$vol" )
-  TUI_FOLDER_LABELS+=( "「$(basename "$vol")」の直下全体" )
-  TUI_FOLDERS+=( "__MANUAL__" )
-  TUI_FOLDER_LABELS+=( "パスを手動で入力する..." )
-}
-
 # Step 1 本体。TUI_SRC を設定する。0=決定 1=中止
 tui_view_source() {
   TUI_TITLE="$PROG v$VERSION  [1/4] コピー元の選択"
@@ -70,22 +41,14 @@ tui_view_source() {
   tui_menu || return 1
   local vol="${TUI_VOLS[$TUI_SELECTED]}"
 
-  tui_source_candidates "$vol"
-  TUI_HEADER="ボリューム: $vol"
-  TUI_ITEMS=( "${TUI_FOLDER_LABELS[@]}" )
-  tui_menu || return 1
-  local pick="${TUI_FOLDERS[$TUI_SELECTED]}"
+  # フォルダを階層移動して選ぶ（CLI と同じく任意のフォルダを指定できる）
+  TUI_BROWSE_DIR="$vol"
+  TUI_BROWSE_ROOT="$vol"
+  TUI_PICK_LABEL="コピー元"
+  TUI_PICK_CREATE=0
+  tui_pick_folder || return 1
+  TUI_SRC="$TUI_PICKED"
 
-  if [ "$pick" = "__MANUAL__" ]; then
-    TUI_HEADER=""
-    TUI_PROMPT_LABEL="コピー元のパスを入力してください（例: /Volumes/X/DCIM/100GOPRO）"
-    TUI_FOOTER="[Enter] 決定   [Esc] 戻る"
-    tui_prompt || return 1
-    pick="$(expand_tilde "${TUI_INPUT}")"
-  fi
-
-  [ -n "$pick" ] || return 1
-  TUI_SRC="$(abspath "$pick")"
   if [ ! -d "$TUI_SRC" ]; then
     tui_message "フォルダが見つかりません: $TUI_SRC"
     return 1

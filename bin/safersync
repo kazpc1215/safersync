@@ -67,6 +67,8 @@ tui_source_all() {
   # shellcheck source=/dev/null
   . "$LIB_DIR/tui/components.sh"
   # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/picker.sh"
+  # shellcheck source=/dev/null
   . "$LIB_DIR/tui/views/step_src.sh"
   # shellcheck source=/dev/null
   . "$LIB_DIR/tui/views/step_dst.sh"
