@@ -6,16 +6,67 @@
 - **データを削除しません。** 転送先の余分なファイルも、転送元のファイルも消しません
 - **設定ファイルはありません。** すべてコマンドライン引数で指定します
 
+## インストール
+
+特別なツールや追加パッケージ（Homebrew, Python, Node.js 等）のインストールは**一切不要**です。macOS 標準の `bash` と `rsync` だけで動作します。
+
+### ステップ 1: リポジトリのクローン
+ターミナルを開き、以下を実行してリポジトリを手元に取得します。
+
+```sh
+git clone https://github.com/kazpc1215/safersync.git ~/safersync
+```
+
+### ステップ 2: コマンドを使えるようにする（パスを通す）
+ターミナルから `safersync` だけで呼び出せるように、シンボリックリンクを作成します。
+
+**方法 A: `~/.local/bin` を使う場合（推奨・管理者権限不要）**
+```sh
+mkdir -p ~/.local/bin
+ln -sfn ~/safersync/bin/safersync ~/.local/bin/safersync
+```
+> [!NOTE]
+> `safersync: command not found` と出る場合は、まだ `~/.local/bin` に PATH が通っていません。以下を実行してシェルを再読み込みしてください。
+> ```sh
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+> source ~/.zshrc
+> ```
+
+**方法 B: `/usr/local/bin` を使う場合（多くの環境ですでに PATH が通っています）**
+```sh
+sudo ln -sfn ~/safersync/bin/safersync /usr/local/bin/safersync
+```
+
+### ステップ 3: 動作確認
+```sh
+safersync --version
+# safersync v1.0.0 と表示されれば完了です
+```
+
+---
+
+### アップデートとアンインストール
+
+- **アップデート**:
+  ```sh
+  cd ~/safersync && git pull
+  ```
+- **アンインストール**:
+  作成したリンクとフォルダを削除するだけで元通りになります。
+  ```sh
+  rm -f ~/.local/bin/safersync /usr/local/bin/safersync
+  rm -rf ~/safersync
+  ```
+
+---
+
 ## 3分で試す
 
 ```sh
-# 1) コマンドを置く（~/.local/bin に PATH が通っていること）
-ln -sfn ~/safersync/bin/safersync ~/.local/bin/safersync
-
-# 2) HDD を接続して、状態を確認する
+# 1) HDD を接続して、状態を確認する
 safersync --status
 
-# 3) コピーする（例: ムービーの 写真フォルダ → HDD の 写真フォルダ）
+# 2) コピーする（例: Macの 写真フォルダ → HDD の 写真フォルダ）
 safersync ~/写真 /Volumes/HDD/写真
 ```
 
