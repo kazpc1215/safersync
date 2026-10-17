@@ -32,10 +32,10 @@ teardown() {
 # 基本（ヘルプ・バージョン・設定ファイルを使わないこと）
 # ---------------------------------------------------------------------------
 
-@test "--version は v1.0.0 を表示する" {
+@test "--version は v1.1.0 を表示する" {
   run ss --version
   [ "$status" -eq 0 ]
-  [ "$output" = "safersync v1.0.0" ]
+  [ "$output" = "safersync v1.1.0" ]
 }
 
 @test "--help に主要なオプションが表示される" {
@@ -45,7 +45,7 @@ teardown() {
 
   local opts=(--to --from --exclude --fat --apfs
               --status --verify-only --no-verify --checksum --dry-run
-              --mount-root --ignore-space-check --stats)
+              --mount-root --ignore-space-check --stats --tui)
   local o
   for o in "${opts[@]}"; do
     [[ "$output" == *"$o"* ]] || { echo "ヘルプに $o がありません"; return 1; }
@@ -283,8 +283,14 @@ teardown() {
   [ -f "$BATS_TEST_TMPDIR/d2/extra.bin" ]  # 余分なファイルも消さない
 }
 
-@test "本体に削除コマンド（rm -rf / --delete）が無い" {
-  ! awk '{ sub(/#.*/, ""); print }' "$SAFERSYNC" | grep -qE 'rm -rf|--delete'
+@test "本体と lib に削除コマンド（rm -rf / --delete）が無い" {
+  local f
+  for f in "$SAFERSYNC" "$LIB_DIR"/core/*.sh "$LIB_DIR"/tui/*.sh "$LIB_DIR"/tui/views/*.sh; do
+    if awk '{ sub(/#.*/, ""); print }' "$f" | grep -qE 'rm -rf|--delete'; then
+      echo "削除コマンドが見つかりました: $f"
+      return 1
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -401,8 +407,9 @@ teardown() {
 # 静的チェック
 # ---------------------------------------------------------------------------
 
-@test "shellcheck の警告がない（-S warning）" {
+@test "shellcheck の警告がない（bin と lib 全体・-S warning）" {
   command -v shellcheck >/dev/null 2>&1 || skip "shellcheck が無いためスキップします"
-  run shellcheck -S warning "$SAFERSYNC"
+  run shellcheck -S warning "$SAFERSYNC" \
+    "$LIB_DIR"/core/*.sh "$LIB_DIR"/tui/*.sh "$LIB_DIR"/tui/views/*.sh
   [ "$status" -eq 0 ]
 }

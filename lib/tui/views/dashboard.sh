@@ -120,7 +120,11 @@ tui_view_dashboard() {   # $1=src $2=dst
   fi
 
   TUI_ELAPSED=$(( $(date +%s) - t0 ))
-  return "$TUI_XFER_RC"
+
+  # 終了コードは CLI とそろえる（コピー失敗 > 照合失敗 > 成功）
+  if [ "$TUI_XFER_RC" -ne 0 ]; then return "$TUI_XFER_RC"; fi
+  if [ "$TUI_VERIFY_RC" -ne 0 ]; then return 1; fi
+  return 0
 }
 
 # Step 6 本体。完了レポートを表示して 1 キー待つ

@@ -199,6 +199,7 @@ tui_busy() {   # $1=ラベル $2...=コマンド
   local label="$1"; shift
   "$@" &
   local pid=$!
+  TUI_CHILD_PID="$pid"
   local spin='|/-\\' i=0 w h buf c
   while kill -0 "$pid" 2>/dev/null; do
     IFS=' ' read -r w h <<< "$(tui_term_size)"
@@ -209,5 +210,7 @@ tui_busy() {   # $1=ラベル $2...=コマンド
     sleep 0.2
   done
   wait "$pid"
-  return $?
+  local rc=$?
+  TUI_CHILD_PID=""
+  return "$rc"
 }
