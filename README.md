@@ -40,7 +40,7 @@ sudo ln -sfn ~/safersync/bin/safersync /usr/local/bin/safersync
 ### ステップ 3: 動作確認
 ```sh
 safersync --version
-# safersync v1.1.0 と表示されれば完了です
+# safersync v1.2.0 と表示されれば完了です
 ```
 
 ---
