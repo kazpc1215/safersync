@@ -25,7 +25,7 @@
 # shellcheck disable=SC2034
 set -o pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 PROG="$(basename "$0")"
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,8 @@ tui_source_all() {
   . "$LIB_DIR/tui/layout.sh"
   # shellcheck source=/dev/null
   . "$LIB_DIR/tui/components.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/picker.sh"
   # shellcheck source=/dev/null
   . "$LIB_DIR/tui/views/step_src.sh"
   # shellcheck source=/dev/null
