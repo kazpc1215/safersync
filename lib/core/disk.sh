@@ -32,7 +32,8 @@ mount_point_of() {   # $1=path
 # コピー先が $MOUNT_ROOT の下にあるのに、そのボリュームが実マウントされて
 # いなければ、開始前に中止する（終了コード 2）。
 # 基点の外（~/ や /tmp など）を指定したときは判定しない。
-require_mounted_dest() {   # $1=dst
+# コピー先が基点の下にあるとき、実マウントされていれば 0（対象外なら常に 0）
+dest_is_mounted() {   # $1=dst
   [ "$MOUNT_ROOT" = "/" ] && return 0
   case "$1" in
     "$MOUNT_ROOT"/*) ;;
@@ -43,6 +44,11 @@ require_mounted_dest() {   # $1=dst
   case "$mp" in
     "$MOUNT_ROOT"/*) return 0 ;;
   esac
+  return 1
+}
+
+require_mounted_dest() {   # $1=dst
+  dest_is_mounted "$1" && return 0
 
   err "コピー先のボリュームがマウントされていません: $1"
   err "外付け媒体を接続してから再実行してください。"

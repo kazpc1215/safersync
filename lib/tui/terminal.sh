@@ -11,6 +11,8 @@
 TUI_STTY_SAVE=""
 TUI_ACTIVE=0
 TUI_WINCH=0
+TUI_CHILD_PID=""
+TUI_INTERRUPTED=0
 
 # 端末サイズを "COLS LINES" で返す
 tui_term_size() {
@@ -42,14 +44,32 @@ tui_term_esc_timeout_off() { [ -t 0 ] && stty min 1 time 0 2>/dev/null; return 0
 # Alternate Screen へ切り替えて TUI を開始する
 tui_term_enter() {
   TUI_ACTIVE=1
+  TUI_INTERRUPTED=0
+  TUI_CHILD_PID=""
   printf '\033[?1049h'      # 代替画面へ
   printf '\033[?25l'        # カーソル非表示
   tui_term_raw_on
-  trap 'tui_term_cleanup' EXIT INT TERM HUP
+  trap 'tui_term_cleanup' EXIT
+  trap 'tui_on_interrupt' INT TERM HUP
   trap 'TUI_WINCH=1' WINCH
 }
 
-# 終了・中断時に必ず元の画面へ戻す
+# Ctrl-C / TERM: 実行中の子プロセス（rsync）も止めて、画面を戻して終了する
+tui_on_interrupt() {
+  trap - INT TERM HUP
+  TUI_INTERRUPTED=1
+  if [ -n "${TUI_CHILD_PID:-}" ]; then
+    pkill -TERM -P "$TUI_CHILD_PID" 2>/dev/null
+    kill -TERM "$TUI_CHILD_PID" 2>/dev/null
+    sleep 1
+    pkill -KILL -P "$TUI_CHILD_PID" 2>/dev/null
+    kill -KILL "$TUI_CHILD_PID" 2>/dev/null
+    wait "$TUI_CHILD_PID" 2>/dev/null
+  fi
+  exit 130
+}
+
+# 終了・中断時に必ず元の画面へ戻す（EXIT から一度だけ呼ばれる）
 tui_term_cleanup() {
   trap - EXIT INT TERM HUP WINCH
   tui_term_raw_off
@@ -57,6 +77,9 @@ tui_term_cleanup() {
   printf '\033[?1049l'      # メインスクリーンへ復帰
   printf '%s' "${C_RESET:-}"
   TUI_ACTIVE=0
+  if [ "${TUI_INTERRUPTED:-0}" = 1 ]; then
+    printf '%s\n' "中断しました（次回は続きからコピーできます）" >&2
+  fi
 }
 
 # 画面全体を消す

@@ -56,8 +56,9 @@ key() {   # $1=bytes
   [ "$(key $'\033[D')" = "LEFT" ]
 }
 
-@test "Enter / 1 文字 / q を解釈する（Bash 3.2 の Enter は空文字）" {
+@test "Enter を LF / CR / 空文字のいずれでも解釈する" {
   [ "$(key $'\n')" = "ENTER" ]
+  [ "$(key $'\r')" = "ENTER" ]
   [ "$(key 'a')" = "a" ]
   [ "$(key 'q')" = "QUIT" ]
 }

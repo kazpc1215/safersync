@@ -56,6 +56,30 @@ LIB_DIR="$SCRIPT_DIR/../lib"
 # shellcheck source=/dev/null
 . "$LIB_DIR/core/verify.sh"
 
+# TUI は必要になったときだけ読み込む（CLI の起動を軽く保つ）
+tui_source_all() {
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/terminal.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/input.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/layout.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/components.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/step_src.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/step_dst.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/step_opt.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/step_prev.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/views/dashboard.sh"
+  # shellcheck source=/dev/null
+  . "$LIB_DIR/tui/app.sh"
+}
+
 # ---------------------------------------------------------------------------
 # 接続状態の表示（CLI 専用）
 # ---------------------------------------------------------------------------
@@ -90,6 +114,9 @@ ${C_BOLD}使い方${C_RESET}
   コピー先フォルダが無ければ作られます。
   末尾の "/" は付けても付けなくても同じ意味になります。
 
+  引数なしで起動する（safersync）と、対話ウィザード（TUI）が開き、
+  矢印キーだけでコピー元・コピー先を選べます。${C_BOLD}-i${C_RESET} でも起動します。
+
 ${C_BOLD}例${C_RESET}
   $PROG ~/写真 /Volumes/HDD/写真
       # → HDD の 写真フォルダへコピー＆照合（無ければ作られる）
@@ -101,6 +128,7 @@ ${C_BOLD}例${C_RESET}
   $PROG --status                                              # ボリュームの状態
 
 ${C_BOLD}オプション${C_RESET}
+  -i, --tui            対話ウィザード（TUI）を起動する。引数なしでも起動する
       --mount-root DIR 外付けボリュームの基点（既定: /Volumes。例: /media/ユーザー名）
   -t, --to DIR         コピー先（位置引数と同じ。順序は自由）
   -f, --from DIR       コピー元（位置引数と同じ。順序は自由）
@@ -179,6 +207,7 @@ parse_args() {
       -V|--version)     MODE="version"; return 0 ;;
       --status)         MODE="status" ;;
       -n|--dry-run)     DRY_RUN=1 ;;
+      -i|--tui)         MODE="tui" ;;
       --verify-only)    MODE="verify" ;;
       --no-verify)      DO_VERIFY=0 ;;
       -c|--checksum)    CHECKSUM=1 ;;
@@ -208,6 +237,9 @@ parse_args() {
 
 # ---------------------------------------------------------------------------
 main() {
+  local no_args=0
+  [ $# -eq 0 ] && no_args=1
+
   parse_args "$@"
 
   START_TS="$(date +%s)"
@@ -220,6 +252,20 @@ main() {
     version)  printf '%s\n' "$PROG v$VERSION"; exit 0 ;;
     status)   do_status; exit 0 ;;
   esac
+
+  # --- 対話ウィザード（TUI）---
+  #   引数なしで対話端末なら自動起動。--tui/-i なら明示的に起動する。
+  if [ "$MODE" = "tui" ] || { [ "$no_args" = 1 ] && [ -t 0 ] && [ -t 1 ]; }; then
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+      err "TUI は対話端末でのみ起動できます（--help を参照）"
+      exit 1
+    fi
+    # 外付けボリュームの基点は環境変数・引数のどちらでも絶対パスにそろえる
+    MOUNT_ROOT="$(abspath "$(expand_tilde "$MOUNT_ROOT")")"
+    tui_source_all
+    tui_main
+    exit $?
+  fi
 
   # --- コピー元とコピー先 ---
   [ -n "$FROM_ARG" ] || die "コピー元を指定してください（例: $PROG ~/書類 /Volumes/HDD/書類）"

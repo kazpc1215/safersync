@@ -53,7 +53,8 @@ tui_read_key() {
   fi
 
   case "$c1" in
-    '')              printf 'ENTER' ;;      # Bash 3.2 では Enter は空文字になる
+    # Enter は環境によって空文字（正準モード）/ \n / \r のいずれにもなる
+    ''|$'\n'|$'\r')  printf 'ENTER' ;;
     ' ')             printf 'SPACE' ;;
     $'\x7f'|$'\b')   printf 'BACKSPACE' ;;
     q|Q)             printf 'QUIT' ;;
