@@ -407,9 +407,10 @@ teardown() {
 # 静的チェック
 # ---------------------------------------------------------------------------
 
-@test "shellcheck の警告がない（bin と lib 全体・-S warning）" {
+@test "shellcheck の警告がない（lib 全体・-S warning）" {
   command -v shellcheck >/dev/null 2>&1 || skip "shellcheck が無いためスキップします"
-  run shellcheck -S warning "$SAFERSYNC" \
+  # bin/safersync は Go バイナリに差し替えて回帰テストをするため、対象は lib/ 全体
+  run shellcheck -S warning \
     "$LIB_DIR"/core/*.sh "$LIB_DIR"/tui/*.sh "$LIB_DIR"/tui/views/*.sh
   [ "$status" -eq 0 ]
 }
